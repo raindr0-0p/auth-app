@@ -5,6 +5,7 @@ from app.models.user import User
 from app.schemas.auth import (
     UserCreate, UserLogin, UserPublic, TokenBase,
     EmailVerificationRequest, PasswordResetRequest,
+    ResendVerificationRequest, ForgotPasswordRequest,
     Message, SessionInfo, SessionList, ChangePasswordRequest
 )
 from app.services.auth_service import (
@@ -58,7 +59,8 @@ async def login(
     request: Request,
     response: Response,
     user_login: UserLogin,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _: None = Depends(csrf_protect)
 ):
     """
     Log in a user and create a session.
@@ -142,7 +144,8 @@ async def logout(
     request: Request,
     response: Response,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _: None = Depends(csrf_protect)
 ):
     """
     Log out the current user by revoking their session.
@@ -176,7 +179,9 @@ async def verify_email(
 @router.post("/resend-verification", response_model=Message)
 async def resend_verification(
     request: Request,
-    db: Session = Depends(get_db)
+    resend_request: ResendVerificationRequest,
+    db: Session = Depends(get_db),
+    _: None = Depends(csrf_protect)
 ):
     """
     Resend the email verification email.
@@ -184,32 +189,48 @@ async def resend_verification(
     # Apply rate limiting
     resend_verification_rate_limit(request)
 
-    # In a real implementation, we would:
-    # 1. Get the email from the authenticated user (if we wanted to require auth)
-    # 2. Or we could accept an email in the request body (but that risks enumeration)
-    # 3. For now, we'll require authentication to resend verification (more secure)
-    # But the requirement says to implement a resend-verification endpoint that doesn't leak account info
+    # Normalize email
+    email = resend_request.email.lower()
 
-    # Let's change approach: we'll accept an email in the request but return a generic message
-    # However, to avoid changing the schema, let's use the TokenBase schema but document that the token field contains the email
-    # This is not ideal but meets the requirement of not leaking information
+    # Find user by normalized email (to avoid enumeration)
+    user = db.query(User).filter(User.email == email).first()
 
-    # Actually, let's create a proper endpoint that requires authentication for resending verification
-    # This is more secure and doesn't leak information
-    # But the requirement might be for an unauthenticated endpoint
+    # Always return generic response to avoid account enumeration
+    if user and not user.email_verified:
+        # Generate a fresh verification token
+        verification_token = secrets.token_urlsafe(32)
+        verification_token_hash = hash_token(verification_token)
+        expires_at = datetime.utcnow() + timedelta(minutes=settings.EMAIL_VERIFICATION_EXPIRE_MINUTES)
 
-    # Given the ambiguity, let's implement an unauthenticated endpoint that accepts email in body
-    # But we need to modify the schema or use a different approach
+        # Invalidate any existing unused verification tokens for this user
+        existing_tokens = db.query(EmailVerificationToken).filter(
+            EmailVerificationToken.user_id == user.id,
+            EmailVerificationToken.used_at == None
+        ).all()
+        for token in existing_tokens:
+            token.used_at = datetime.utcnow()  # Mark as used
 
-    # For now, we'll return a generic message and note that in a real implementation
-    # we would accept an email and send a new verification token if the account exists and is not verified
+        # Create new verification token
+        db_verification_token = EmailVerificationToken(
+            user_id=user.id,
+            token_hash=verification_token_hash,
+            expires_at=expires_at,
+        )
+        db.add(db_verification_token)
+        db.commit()
+
+        # In a real application, we would send the email here.
+        # For development, we will print the token to the console.
+        print(f"Email verification token for {user.email}: {verification_token}")
 
     return Message(detail="If the account exists and is not verified, you will receive a verification email.")
 
 @router.post("/forgot-password", response_model=Message)
 async def forgot_password(
     request: Request,
-    db: Session = Depends(get_db)
+    forgot_request: ForgotPasswordRequest,
+    db: Session = Depends(get_db),
+    _: None = Depends(csrf_protect)
 ):
     """
     Request a password reset email.
@@ -217,9 +238,21 @@ async def forgot_password(
     # Apply rate limiting
     forgot_password_rate_limit(request)
 
-    # We don't leak whether the account exists
-    # In a real implementation, we would accept an email in the request body
-    # But to avoid changing schemas repeatedly, we'll return a generic message
+    # Normalize email
+    email = forgot_request.email.lower()
+
+    # Find user by normalized email (to avoid enumeration)
+    user = db.query(User).filter(User.email == email).first()
+
+    # Always return generic response to avoid account enumeration
+    if user and user.is_active:
+        # Generate a password reset token
+        reset_token = create_password_reset_token(db, user.id)
+
+        # In a real application, we would send the email here.
+        # For development, we will print the reset link to the console.
+        reset_url = f"{settings.FRONTEND_URL}/reset-password?token={reset_token}"
+        print(f"Password reset URL for {user.email}: {reset_url}")
 
     return Message(detail="If the account exists, you will receive a password reset email.")
 
@@ -227,7 +260,8 @@ async def forgot_password(
 async def reset_password_endpoint(
     request: Request,
     password_reset: PasswordResetRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _: None = Depends(csrf_protect)
 ):
     """
     Reset password using a token.
@@ -247,7 +281,8 @@ async def reset_password_endpoint(
 async def change_password_endpoint(
     change_password: ChangePasswordRequest,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _: None = Depends(csrf_protect)
 ):
     """
     Change the current user's password.
@@ -288,7 +323,8 @@ async def get_user_sessions_endpoint(
 async def revoke_session_endpoint(
     session_id: int,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _: None = Depends(csrf_protect)
 ):
     """
     Revoke a specific session for the current user.
@@ -305,13 +341,7 @@ async def revoke_session_endpoint(
             detail="Session not found"
         )
 
-    # Revoke the session
-    if revoke_session(db, session.token_hash):  # We need to get the token hash
-        # Actually, we need to get the session token to revoke it
-        # Let's change the approach: we'll revoke by session ID directly
-        pass
-
-    # For now, let's implement a simple revoke by session ID
+    # Revoke the session by setting revoked_at timestamp
     session.revoked_at = datetime.utcnow()
     db.commit()
 
@@ -319,17 +349,49 @@ async def revoke_session_endpoint(
 
 @router.post("/sessions/revoke-others", response_model=Message)
 async def revoke_other_sessions_endpoint(
+    request: Request,
     current_user: User = Depends(get_current_user),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    _: None = Depends(csrf_protect)
 ):
     """
     Revoke all other sessions for the current user (keep the current one).
     """
-    # Get current session token
-    # We would need to get this from the request or dependency
-    # For now, we'll revoke all sessions (simplified)
-    count = revoke_all_sessions_for_user(db, current_user.id)
-    return Message(detail=f"Revoked {count} other sessions")
+    # Get current session token from cookie
+    session_token = request.cookies.get(settings.COOKIE_NAME)
+    if not session_token:
+        # If no session token, revoke all sessions (edge case)
+        count = revoke_all_sessions_for_user(db, current_user.id)
+        return Message(detail=f"Revoked {count} sessions")
+
+    # Hash the token to find the session in DB
+    token_hash = hash_token(session_token)
+    current_session = db.query(SessionModel).filter(
+        SessionModel.token_hash == token_hash,
+        SessionModel.user_id == current_user.id,
+        SessionModel.revoked_at == None
+    ).first()
+
+    if not current_session:
+        # If current session not found, revoke all sessions
+        count = revoke_all_sessions_for_user(db, current_user.id)
+        return Message(detail=f"Revoked {count} sessions")
+
+    # Get all sessions for the user
+    all_sessions = db.query(SessionModel).filter(
+        SessionModel.user_id == current_user.id,
+        SessionModel.revoked_at == None
+    ).all()
+
+    # Revoke all except the current session
+    revoked_count = 0
+    for session in all_sessions:
+        if session.id != current_session.id:
+            session.revoked_at = datetime.utcnow()
+            revoked_count += 1
+
+    db.commit()
+    return Message(detail=f"Revoked {revoked_count} other sessions")
 
 # Helper functions that need to be imported or defined
 def set_session_cookie(response: Response, session_token: str) -> None:

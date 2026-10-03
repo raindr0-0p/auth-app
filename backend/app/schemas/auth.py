@@ -35,6 +35,14 @@ class EmailVerificationRequest(TokenBase):
 class PasswordResetRequest(TokenBase):
     new_password: str = Field(..., min_length=8, max_length=255)
 
+# Resend verification schema
+class ResendVerificationRequest(BaseModel):
+    email: EmailStr
+
+# Forgot password schema
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
 # Change password schema
 class ChangePasswordRequest(BaseModel):
     current_password: str = Field(..., min_length=8, max_length=255)

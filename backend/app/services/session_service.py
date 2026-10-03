@@ -5,24 +5,26 @@ This file contains session-related business logic.
 from sqlalchemy.orm import Session
 from app.models.session import Session as SessionModel
 from app.models.user import User
-from app.services.auth_service import hash_token
-from datetime import datetime
-from typing import Optional, List
+from datetime import datetime, timedelta
+from typing import Optional, List, Tuple
+import secrets
+import hashlib
+from app.config import settings
 
-def create_session(db: Session, user_id: int, user_agent: str = None, ip_address: str = None) -> SessionModel:
+def hash_token(token: str) -> str:
+    """Hash a token for storage."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+def create_session(db: Session, user_id: int, user_agent: str = None, ip_address: str = None) -> Tuple[SessionModel, str]:
     """
     Create a new session for the user.
-    This function is also in auth_service.py - we should consolidate.
-    For now, we'll keep it here and update auth_service to use this.
+    Returns (session_model, session_token)
     """
     # Generate a secure random session token
-    import secrets
     session_token = secrets.token_urlsafe(32)
     token_hash = hash_token(session_token)
 
     # Set expiration
-    from app.config import settings
-    from datetime import timedelta
     expires_at = datetime.utcnow() + timedelta(minutes=settings.SESSION_EXPIRE_MINUTES)
 
     # Create the session
@@ -37,7 +39,7 @@ def create_session(db: Session, user_id: int, user_agent: str = None, ip_address
     db.commit()
     db.refresh(db_session)
 
-    return db_session
+    return db_session, session_token
 
 def get_session(db: Session, session_token: str) -> Optional[SessionModel]:
     """

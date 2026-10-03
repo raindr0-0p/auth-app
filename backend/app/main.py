@@ -9,9 +9,19 @@ app = FastAPI(
 )
 
 # CORS middleware
+import os
+from app.config import settings
+
+# Determine allowed origins based on environment
+if settings.ENVIRONMENT == "development":
+    allow_origins = ["http://localhost:5173"]
+else:
+    # In production, this should be set via environment variable
+    allow_origins = os.getenv("ALLOWED_ORIGINS", "").split(",") if os.getenv("ALLOWED_ORIGINS") else []
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[],  # Will be set from environment variable
+    allow_origins=allow_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
